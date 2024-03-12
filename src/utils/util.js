@@ -1,0 +1,133 @@
+const md5 = require("md5");
+const axios = require("axios");
+async function getToken(obj) {
+  const mixinKeyEncTab = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52,
+  ];
+
+  // 对 imgKey 和 subKey 进行字符顺序打乱编码
+  const getMixinKey = (orig) =>
+    mixinKeyEncTab
+      .map((n) => orig[n])
+      .join("")
+      .slice(0, 32);
+
+  // 为请求参数进行 wbi 签名
+  function encWbi(params, img_key, sub_key) {
+    const mixin_key = getMixinKey(img_key + sub_key),
+      curr_time = Math.round(Date.now() / 1000),
+      chr_filter = /[!'()*]/g;
+
+    Object.assign(params, { wts: curr_time }); // 添加 wts 字段
+    // 按照 key 重排参数
+    const query = Object.keys(params)
+      .sort()
+      .map((key) => {
+        // 过滤 value 中的 "!'()*" 字符
+        const value = params[key].toString().replace(chr_filter, "");
+        return `${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+      })
+      .join("&");
+
+    const wbi_sign = md5(query + mixin_key); // 计算 w_rid
+
+    return query + "&w_rid=" + wbi_sign;
+  }
+
+  // 获取最新的 img_key 和 sub_key
+  async function getWbiKeys() {
+    const res = await fetch("https://api.bilibili.com/x/web-interface/nav", {
+      headers: {
+        // SESSDATA 字段
+        Cookie: "SESSDATA=xxxxxx",
+      },
+    });
+    const {
+      data: {
+        wbi_img: { img_url, sub_url },
+      },
+    } = await res.json();
+
+    return {
+      img_key: img_url.slice(
+        img_url.lastIndexOf("/") + 1,
+        img_url.lastIndexOf(".")
+      ),
+      sub_key: sub_url.slice(
+        sub_url.lastIndexOf("/") + 1,
+        sub_url.lastIndexOf(".")
+      ),
+    };
+  }
+  return main(obj);
+  async function main(params) {
+    const web_keys = await getWbiKeys();
+    // const params = { foo: "114", bar: "514", baz: 1919810 },
+    (img_key = web_keys.img_key), (sub_key = web_keys.sub_key);
+    const query = encWbi(params, img_key, sub_key);
+    return query;
+  }
+}
+
+// 根据bvid获取视频流
+const getAudioStream = async (bvid, type, title) => {
+  // 根据bvid获取视频下载地址数组
+  const getDownloadPathById = async (bvid, type, title) => {
+    const cidList = await getCidByBvid(bvid, title);
+    const result = [];
+    for (const musicInfo of cidList) {
+      const params = {
+        bvid,
+        cid: musicInfo.id,
+        qn: 112,
+      };
+      // 下载音频
+      if (type === "mp3") {
+        params.fnval = 16;
+      }
+      const res = await axios.get("https://api.bilibili.com/x/player/playurl", {
+        params,
+      });
+      musicInfo.baseUrl =
+        type === "mp3"
+          ? res.data.data.dash.audio[0].baseUrl
+          : res.data.data.durl[0].url;
+
+      result.push(musicInfo);
+    }
+    return result;
+  };
+  // 根据bvid获取cid数组
+  const getCidByBvid = async (bvid, title) => {
+    const res = await axios.get(
+      "https://api.bilibili.com/x/web-interface/view",
+      {
+        params: {
+          bvid,
+        },
+      }
+    );
+    return res.data.data.pages.map((item, index) => {
+      let album = "";
+      let name = item.part || title;
+      return {
+        id: item.cid, // id和cid是同一个值，因为音乐播放器获取的值是id，所以要设置成id。
+        singer: "匿名",
+        album,
+        name,
+        duration: item.duration,
+        image: item.first_frame,
+        url: `/music/${item.part}.mp3`,
+      };
+    });
+  };
+  return getDownloadPathById(bvid, type, title);
+};
+
+module.exports = {
+  getToken,
+  getAudioStream,
+};
