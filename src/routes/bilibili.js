@@ -1,10 +1,12 @@
 let express = require('express');
 const { route } = require('./music');
 const axios = require("axios");
-const puppeteer = require('puppeteer');  
 const { getToken , getAudioStream } = require('../utils/util')
-console.log(puppeteer);
 let router = express.Router();
+const fs = require('fs');
+const path = require('path');
+const { log } = require('console');
+let public = path.join(__dirname,'../../public');
 let cookies = [];
 
 router.get('/search',async (req,res) => {
@@ -36,38 +38,85 @@ router.get('/search',async (req,res) => {
     })
 
 })
-
 router.get('/audio',async (req,res) => {
     const query = req.query;
     const downloadList = await getAudioStream(query.bvid,'mp3','title');
-    // console.log(downloadList);
-    if (downloadList.length === 1) {
-
-        const audioStream = axios.get(downloadList[0].baseUrl, {
-            headers: {
-              Referer:`https://www.bilibili.com/video/${query.bvid}`,
-            },
-            responseType: "stream",
-        }).then(response => {
-            // console.log(response.data);
-            return response.data
-        }).catch(err => {
-            // 处理错误  
-            console.error('Error fetching video stream:', err);  
-            res.writeHead(500);  
-            res.end('Internal Server Error');  
-        })
-
-        audioStream.then(stream => {  
-            // 设置响应头，告诉客户端这是一个视频流  
-            res.writeHead(200, {  
-              'Content-Type': 'audio/mpeg',  
-              'Content-Disposition': 'inline; filename="audio.mp3"', // 告诉浏览器以内联方式处理，并提供文件名
-              // 其他可能需要的头信息，比如Transfer-Encoding等  
-            });  
+    if (downloadList[0] && downloadList.length >= 1) {
+        let url = path.join(public,'/'+query.bvid+'.mp3')
+        console.log(url);
+        fs.exists(url,async function(exists) {
+            if(!exists) {
+                await axios.get(downloadList[0].baseUrl, {
+                    headers: {
+                      Referer:`https://www.bilibili.com/video/${query.bvid}`,
+                      Range: `bytes=0-`,
+                    },
+                    responseType: "stream",
+                }).then(async function (response) {
+                    const pipeline = require('stream').pipeline;
+                    const writer = fs.createWriteStream(url);
+                    pipeline(response.data, writer, (err) => {
+                        if (err) {
+                            console.error('Error writing audio file:', err);
+                            res.writeHead(500);
+                            res.end('Internal Server Error');
+                        } else {
+                            console.log('Audio file saved successfully');
+                        }
+                    });
+                    // const fileStream = fs.createReadStream(response.data);
+                    // res.writeHead(206, {
+                    //     'Content-Type': 'audio/mp3',
+                    //     'Content-Length': response.headers['content-length'],
+                    //     'Content-Range': response.headers['content-range']
+                    // });
+                    // fileStream.pipe(res);
         
-            // 将视频流通过管道传输到响应流  
-            stream.pipe(res);  
+                    // Send audio data to client while writing to file system
+                    response.data.on('data', (chunk) => {
+                        res.write(chunk);
+                    });
+        
+                    response.data.on('end', () => {
+                        res.end();
+                    });
+                }).catch(err => {
+                    console.error('Error fetching video stream:', err);
+                    res.writeHead(500);
+                    res.end('Internal Server Error');
+                });
+ 
+            }else {
+                console.log('Audio file already exists');
+                // 读取服务端音频文件，并返回给客户端
+                fs.stat(url, (err, stats) => {
+                    if (err) {
+                      res.writeHead(500);
+                      res.end('File not found');
+                      return;
+                    }
+                    const fileSize = stats.size;
+                    const range = req.headers.range;
+                    // range字段存在则触发分段下载，否则直接返回整个文件
+                    if (range) {
+                      const parts = range.replace(/bytes=/, '').split('-');
+                      const start = parseInt(parts[0], 10);
+                      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+                      const chunkSize = end - start + 1;
+                      const fileStream = fs.createReadStream(url, { start, end });
+                      res.writeHead(206, {
+                        'Content-Type': 'audio/mp3',
+                        'Content-Length': chunkSize,
+                        'Content-Range': `bytes ${start}-${end}/${fileSize}`
+                      });
+                      fileStream.pipe(res);
+                    } else {
+                      res.writeHead(200, { 'Content-Type': 'audio/mp3', 'Content-Length': fileSize });
+                      fs.createReadStream(path).pipe(res);
+                    }
+                  });
+            }
+
         })
     }
     else {
@@ -76,24 +125,56 @@ router.get('/audio',async (req,res) => {
     }
 
 })
+       
+                // audioStream.then(stream => {  
+                //     // 设置响应头，告诉客户端这是一个视频流  
+                //     res.writeHead(200, {  
+                //       'Content-Type': 'audio/mpeg',  
+                //       'Content-Disposition': 'inline; filename="audio.mp3"', // 告诉浏览器以内联方式处理，并提供文件名
+                //       // 其他可能需要的头信息，比如Transfer-Encoding等  
+                //     });  
+                
+                //     // 将视频流通过管道传输到响应流  
+                //     stream.pipe(res);  
+                // })
+function serveCachedAudio(fileName, cb) {
+    console.log(fileName);
+  }
+    
 
-getBilibiliCookie();
-
-async function getBilibiliCookie() {
-    const browser = await puppeteer.launch({  
-        headless: true, // 设置为 true 则在无头模式下运行  
-        args: ['--no-sandbox', '--disable-setuid-sandbox'] // 可能需要额外的参数来在某些环境中运行  
-      });  
-    const page = await browser.newPage();
-    // 导航到 Bilibili 登录页面  
-    await page.goto('https://bilibili.com');  
-    cookies = await page.cookies();
-    // 使用map方法将每个cookie对象转换为name=value格式的字符串  
-    const cookieStrings = cookies.map(cookie => `${cookie.name}=${cookie.value}`);  
+async function getCookies(url) {  
+    try {  
+        const response = await axios.get(url, {  
+            withCredentials: true, // 如果需要跨域cookie，设置这个为true  
+            headers: {  
+                // 这里可以添加额外的请求头，例如User-Agent等  
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537'  
+            }  
+        });  
   
-    // 使用join方法将字符串连接起来，以逗号分隔  
-    cookies = cookieStrings.join(',');  
-    console.log(cookies);
-}
+        // 检查响应头中的Set-Cookie字段  
+        const setCookieHeader = response.headers['set-cookie'];  
+        if (setCookieHeader) {  
+            // setCookieHeader可能是一个数组，因为可能有多个cookie  
+            cookies = setCookieHeader.join(';');  
+            cookies = cookies.replace(/;/g, ',');  
+            console.log('Cookies:', cookies);  
+            return cookies;  
+        } else {  
+            console.log('No cookies found in the response.');  
+            return null;  
+        }  
+    } catch (error) {  
+        console.error('Error fetching cookies:', error);  
+        return null;  
+    }  
+}  
+  
+// 获取cookie
+getCookies('https://bilibili.com')   
+    .catch(error => {  
+        console.error('An error occurred:', error);  
+    });
+
 
 module.exports = router
